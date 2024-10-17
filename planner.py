@@ -29,7 +29,7 @@ class State:
 
 timestepPeriodSeconds: float = (1 / 1000) / 1000  # 1 us
 
-goalRotations: float = .25
+goalRotations: float = 0.25
 
 maxRotPs: float = rpmToRps(600)
 
@@ -144,10 +144,10 @@ def resetState(toReset: State):
 
 
 param_accelTimeS = (
-    0.015  # held constant (although negative coast times act as cutting into this phase)
+    0.04  # held constant (although negative coast times act as cutting into this phase)
 )
 
-param_coastTimeS = 0.05  # initial value, iterated/optimized
+param_coastTimeS = 0.05  # initial value, iterated to actual working value
 
 simTimeS: float = 0
 
@@ -159,21 +159,25 @@ while abs(lastPosition - goalRotations) > positionTolerance:
     resetState(state)
     simTimeS = 0
 
-    for f in range(0, int(param_accelTimeS / timestepPeriodSeconds)):
-        state = timestep(state, PhaseType.FORWARD, True)
+    phase = PhaseType.FORWARD
 
-        simTimeS += timestepPeriodSeconds
+    while not (
+        phase == PhaseType.REVERSE and abs(state.velocityRotPs) < velocityTolerance
+    ):
+        if param_coastTimeS >= 0:
+            if simTimeS < param_accelTimeS:
+                phase = PhaseType.FORWARD
+            elif simTimeS > param_accelTimeS + param_coastTimeS:
+                phase = PhaseType.REVERSE
+            else:
+                phase = PhaseType.COAST
+        else:
+            if simTimeS < param_accelTimeS + param_coastTimeS:
+                phase = PhaseType.FORWARD
+            else:
+                phase = PhaseType.REVERSE
 
-        timeSeries.append(simTimeS * 1000)
-
-    for k in range(0, int(param_coastTimeS / timestepPeriodSeconds)):
-        state = timestep(state, PhaseType.COAST, True)
-
-        simTimeS += timestepPeriodSeconds
-        timeSeries.append(simTimeS * 1000)
-
-    while abs(state.velocityRotPs) > velocityTolerance:
-        state = timestep(state, PhaseType.REVERSE, True)
+        state = timestep(state, phase, True)
 
         simTimeS += timestepPeriodSeconds
 
@@ -184,7 +188,8 @@ while abs(lastPosition - goalRotations) > positionTolerance:
         "rotation state: "
         + str(state.positionRot)
         + ", coast time param: "
-        + str(param_coastTimeS)
+        + str(param_coastTimeS * 1000)
+        + " ms"
     )
 
     if state.positionRot > goalRotations:
