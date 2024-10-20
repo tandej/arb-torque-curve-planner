@@ -27,11 +27,11 @@ class State:
         self.velocityRotPs = velocityRotPs
 
 
-timestepPeriodSeconds: float = (1 / 1000) / 1000  # 1 us
+simTimestepPeriodSeconds: float = (1 / 1000) / 1000  # 1 us
 
-goalRotations: float = 0.25
+goalRotations: float = 0.5
 
-maxRotPs: float = rpmToRps(600)
+maxRotPs: float = rpmToRps(700)
 
 torqueCurve: List[Tuple[float, float]] = [
     (0, 0.42),
@@ -49,9 +49,9 @@ torqueCurve: List[Tuple[float, float]] = [
     (rpmToRps(720), mNMToNM(235)),
 ]
 
-torqueHeadroom = 0.2
+torqueHeadroom = 0.25
 
-systemMomentKgMSq = 0.0005  # TODO get actual value
+systemMomentKgMSq = 0.0002  # TODO get actual value
 
 
 def interpolateTorque(rpsKey: float, useHeadroom: bool) -> float:
@@ -118,10 +118,10 @@ def timestep(inputState: State, phaseType: PhaseType, applyMaxVLimit: bool) -> S
 
     angPos = (
         inputState.positionRot
-        + (inputState.velocityRotPs * timestepPeriodSeconds)
-        + (0.5 * angAccel * timestepPeriodSeconds * timestepPeriodSeconds)
+        + (inputState.velocityRotPs * simTimestepPeriodSeconds)
+        + (0.5 * angAccel * simTimestepPeriodSeconds * simTimestepPeriodSeconds)
     )
-    angVel = inputState.velocityRotPs + (angAccel * timestepPeriodSeconds)
+    angVel = inputState.velocityRotPs + (angAccel * simTimestepPeriodSeconds)
 
     positionSeries.append(angPos)
     velocitySeries.append(angVel)
@@ -133,7 +133,7 @@ def timestep(inputState: State, phaseType: PhaseType, applyMaxVLimit: bool) -> S
 velocityTolerance = 0.01
 positionTolerance = 0.001
 
-positionIterationStepSizeS = timestepPeriodSeconds * 250
+positionIterationStepSizeS = simTimestepPeriodSeconds * 100
 
 state = State(0, 0)
 
@@ -147,7 +147,7 @@ param_accelTimeS = (
     0.04  # held constant (although negative coast times act as cutting into this phase)
 )
 
-param_coastTimeS = 0.05  # initial value, iterated to actual working value
+param_coastTimeS = 0.015  # initial value, iterated to actual working value
 
 simTimeS: float = 0
 
@@ -179,7 +179,7 @@ while abs(lastPosition - goalRotations) > positionTolerance:
 
         state = timestep(state, phase, True)
 
-        simTimeS += timestepPeriodSeconds
+        simTimeS += simTimestepPeriodSeconds
 
         timeSeries.append(simTimeS * 1000)
 
@@ -199,6 +199,43 @@ while abs(lastPosition - goalRotations) > positionTolerance:
         param_coastTimeS += positionIterationStepSizeS
         debugPrint("increasing coast")
 
+degPerStep = 1.8
+stepClockHertz = 5 * 1000
+
+stepDiv = positionSeries[-1] / (goalRotations * (360 / degPerStep))
+discretizationTimeInterval = int((1 / simTimestepPeriodSeconds) / stepClockHertz)
+# unsafe cast to int here, literally couldn't care less because if someone is putting
+# weird values in for the sim period or step clock they deserve to read this comment
+
+stepPositions: List[float] = []
+stepTimes: List[float] = []
+
+actualStepsCounter = 0
+
+for i in range(0, len(positionSeries)):  # pylint: disable=C0200
+    if i % discretizationTimeInterval == 0:
+        if positionSeries[i] >= stepDiv * actualStepsCounter:
+            if len(stepPositions) != 0:
+                stepTimes.append(timeSeries[i])
+                stepPositions.append(stepPositions[-1])
+
+            stepTimes.append(timeSeries[i])
+            stepPositions.append(actualStepsCounter * stepDiv)
+
+            actualStepsCounter += 1
+
+if actualStepsCounter < (360 * goalRotations) / degPerStep:
+    debugPrint("insufficient step clock frequency!")
+
+stepTimes.append(timeSeries[-1])
+stepPositions.append(stepPositions[-1])
+stepTimes.append(timeSeries[-1])
+stepPositions.append(positionSeries[-1])
+# don't need to increment step counter because it mistakenly
+# counts a step at the beginning, and these cancel out
+
+debugPrint(str(actualStepsCounter) + " steps")
+
 fig, ax = plt.subplots()
 fig.subplots_adjust(right=0.75)
 
@@ -207,6 +244,7 @@ twin2 = ax.twinx()
 twin2.spines.right.set_position(("axes", 1.2))
 
 p1 = ax.plot(timeSeries, positionSeries, c="red")
+ax.plot(stepTimes, stepPositions, c="purple")
 p2 = twin1.plot(timeSeries, velocitySeries, c="green")
 p3 = twin2.plot(timeSeries, accelSeries, c="blue")
 
